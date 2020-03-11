@@ -1,0 +1,235 @@
+#version 450
+
+layout (location = 0) uniform int stage;
+layout (location = 1) uniform uvec2 size;
+layout (location = 2) uniform ivec2 sizeInt;
+layout (location = 3) uniform int stepLength;
+layout (location = 4) uniform uint kernelSpread;
+layout (location = 5) uniform uint kernelSide;
+layout (location = 6) uniform uint kernelMode;
+
+layout (std430, binding = 0) buffer SEED {
+	unsigned int seed[];
+};
+
+struct ProxyData {
+	uint seed;
+	float distance;
+};
+
+layout (std430, binding = 1) buffer NEIGHBOUR {
+	ProxyData neighbour[];
+};
+
+layout (std430, binding = 2) buffer NEIGHBOUR_SWAP {
+	ProxyData neighbourSwap[];
+};
+
+layout (std430, binding = 3) buffer RESULT {
+	float result[];
+};
+
+layout (std430, binding = 4) buffer RESULT_SWAP {
+	float resultSwap[];
+};
+
+layout (std430, binding = 5) buffer FILTER {
+	float weights[];
+};
+
+layout (local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void initialize() 
+{
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y; 
+	uint index = y * size.x + x;
+	
+	neighbour[index].seed = index;
+	if(seed[neighbour[index].seed] != 0)
+		neighbour[index].distance = 0.0f;
+	else
+		neighbour[index].distance = 999999.0f;
+		
+	result[index] = 0.0f;
+	resultSwap[index] = 0.0f;
+}
+
+void flood() {
+	ivec2 dirs[8] = {
+		ivec2(-stepLength, -stepLength), ivec2(-stepLength, 0), ivec2(-stepLength, stepLength), 
+		ivec2(0, -stepLength), ivec2(0, stepLength), 
+		ivec2(stepLength, -stepLength), ivec2(stepLength, 0), ivec2(stepLength, stepLength)
+	};
+
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y; 
+	uint index = y * size.x + x;
+	
+	float minDistance = 0.0f;
+	uint nearestSeed = 0;
+	bool hasFound = false;
+	for(int way = 0; way < 8; ++way) {
+		int hor = int(x) + dirs[way].x;
+		int ver = int(y) + dirs[way].y;	
+		if(hor < 0) 
+			hor += sizeInt.x;
+		else if(hor == sizeInt.x) 
+			hor -= sizeInt.x;
+		if(ver < 0) 
+			ver += sizeInt.y;
+		else if(ver == sizeInt.y) 
+			ver -= sizeInt.y;
+			
+		uint newIndex = uint(ver * sizeInt.x + hor);
+		uint otherSeed = neighbour[newIndex].seed;
+		if(newIndex != index && seed[otherSeed] != 0 && seed[otherSeed] != seed[neighbour[index].seed]) { 
+			float seedX = float(otherSeed % size.x);
+			float seedY = float(otherSeed / size.x);
+			if(abs(seedX - float(x)) > float(size.x) * 0.5f) {
+				if(seedX > float(x))
+					seedX -= float(size.x);
+				else
+					seedX += float(size.x);
+				/*if(seedX > float(size.x) * 0.5f)
+					seedX -= float(size.x);
+				else
+					seedX += float(size.x);*/
+			}
+			if(abs(seedY - float(y)) > float(size.y) * 0.5f) {
+				if(seedY > float(y))
+					seedY -= float(size.y);
+				else
+					seedY += float(size.y);
+				/*if(seedY > float(size.y) * 0.5f)
+					seedY -= float(size.y);
+				else
+					seedY += float(size.y);*/
+			}
+			float distance = pow(seedX - float(x), 2.0f) + pow(seedY - float(y), 2.0f);
+			if(distance < neighbour[index].distance) {
+				hasFound = true;
+				minDistance = distance;
+				nearestSeed = otherSeed;
+			}
+		}
+	}
+	if(hasFound == true) {
+		neighbourSwap[index].seed = nearestSeed;
+		neighbourSwap[index].distance = minDistance;
+	} else {
+		neighbourSwap[index].seed = neighbour[index].seed;
+		neighbourSwap[index].distance = neighbour[index].distance;
+	}
+}
+
+void swap() {
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y; 
+	uint index = y * size.x + x;
+	
+	neighbour[index].seed = neighbourSwap[index].seed;
+	neighbour[index].distance = neighbourSwap[index].distance;
+	//neighbour[index] = neighbourSwap[index];
+}
+
+void separate() {
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y; 
+	uint index = y * size.x + x;
+	
+	bool isDifferent = false;
+	for(int i = int(x) - 1; i <= int(x) + 1; ++i)
+		for(int j = int(y) - 1; j <= int(y) + 1; ++j) {
+			int hor = i;
+			int ver = j;	
+			if(hor < 0)
+				hor += sizeInt.x;
+			else if(hor == sizeInt.x)
+				hor -= sizeInt.x;
+			if(ver < 0)
+				ver += sizeInt.y;
+			else if(ver == sizeInt.y)
+				ver -= sizeInt.y;
+				
+			uint newIndex = uint(ver * sizeInt.x + hor);
+			if(seed[neighbour[newIndex].seed] != seed[neighbour[index].seed])
+				isDifferent = true;
+		}
+	if(isDifferent == true)
+		result[index] = 0.0f;
+	else
+		result[index] = 1.0f;
+}
+
+void relax() {
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y; 
+	uint index = y * size.x + x;
+	
+	float sum = 0.0f;
+	for(int i = 0; i < kernelSpread; ++i) 
+	{
+		ivec2 coords = ivec2(x, y);
+		if(kernelMode == 0)
+			coords.x = (coords.x + i - int(kernelSide)) % sizeInt.x;
+		else
+			coords.y = (coords.y + i - int(kernelSide)) % sizeInt.y;
+		uint newIndex = coords.y * size.x + coords.x;
+		sum += result[newIndex] * weights[i];
+	}
+	resultSwap[index] = sum;
+	
+	/*float sum = 0.0f;
+	for(int i = int(x) - 1; i <= int(x) + 1; ++i)
+		for(int j = int(y) - 1; j <= int(y) + 1; ++j) 
+		{
+			int hor = i;
+			int ver = j;	
+			if(hor < 0)
+				hor += sizeInt.x;
+			else if(hor == sizeInt.x)
+				hor -= sizeInt.x;
+			if(ver < 0)
+				ver += sizeInt.y;
+			else if(ver == sizeInt.y)
+				ver -= sizeInt.y;
+				
+			uint newIndex = uint(ver * sizeInt.x + hor);
+			sum += result[newIndex];
+		}
+	resultSwap[index] = sum / 9.0f;*/
+}
+
+void swapResult() {
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y; 
+	uint index = y * size.x + x;
+	
+	result[index] = resultSwap[index];
+}
+
+void turnSeed() {
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y; 
+	uint index = y * size.x + x;
+	
+	seed[index] = seed[neighbour[index].seed];
+}
+
+void main() {
+	if(stage == 0)
+		initialize();
+	else if(stage == 1)
+		flood();
+	else if(stage == 2)
+		swap();
+	else if(stage == 3)
+		separate();
+	else if(stage == 4)
+		relax();
+	else if(stage == 5)
+		swapResult();
+	else if(stage == 6)
+		turnSeed();
+}

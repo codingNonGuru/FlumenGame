@@ -1,0 +1,141 @@
+#version 450
+#extension GL_ARB_compute_variable_group_size: enable
+
+layout (location = 0) uniform int stage;
+layout (location = 1) uniform uvec2 size;
+layout (location = 2) uniform int filterSize;
+layout (location = 3) uniform vec3 baseColor;
+layout (location = 4) uniform int shape;
+
+layout (std430, binding = 0) buffer DIFFUSE {
+	vec4 diffuse[];
+};
+
+layout (std430, binding = 1) buffer PERLIN {
+	float perlin[];
+};
+
+layout (std430, binding = 2) buffer EDGE_BLUR {
+	float edgeBlur[];
+};
+
+layout (std430, binding = 3) buffer EDGE_BLUR_SWAP {
+	float edgeBlurBuffer[];
+};
+
+layout (std430, binding = 4) buffer FILTER {
+	float weights[];
+};
+
+layout (local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void clear() 
+{
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y;
+	uint index = y * size.x + x;
+	
+	float alpha = 1.0f;
+	
+	if(shape == 0)
+	{
+		if(x < 48 || x > size.x - 48 || y < 48 || y > size.y - 48)
+			alpha = 0.0f;
+	}
+	else
+	{
+		uint deltaX = size.x / 2 - x;
+		uint deltaY = size.y / 2 - y;
+		
+		float radius = sqrt(float(deltaX * deltaX + deltaY * deltaY));
+		if(uint(radius) > size.x / 2 - 48)
+			alpha = 0.0f; 
+	}
+	
+	diffuse[index] = vec4(baseColor.r, baseColor.g, baseColor.b, alpha);
+}
+
+void horizontalBlur() 
+{
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y;
+	uint thisIndex = y * size.x + x;
+
+	float sum = 0.0f;
+	for(int i = -filterSize; i <= filterSize; ++i) 
+	{
+		uint otherX = int(gl_GlobalInvocationID.x) + i;
+		uint otherY = gl_GlobalInvocationID.y;
+		uint otherIndex = otherY * size.x + otherX;
+		float finalValue = diffuse[otherIndex].w;
+		if(otherX < 0 || otherX >= size.x)
+			finalValue = 0.0f;
+		sum += weights[i + filterSize] * finalValue; 	
+	}
+	edgeBlur[thisIndex] = sum;
+}
+
+void verticalBlur() 
+{
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y;
+	uint thisIndex = y * size.x + x;
+
+	float sum = 0.0f;
+	for(int i = -filterSize; i <= filterSize; ++i) 
+	{
+		uint otherX = gl_GlobalInvocationID.x;
+		uint otherY = int(gl_GlobalInvocationID.y) + i;
+		uint otherIndex = otherY * size.x + otherX;
+		
+		float finalValue = edgeBlur[otherIndex];
+		if(otherY < 0 || otherY >= size.y)
+			finalValue = 0.0f;
+			
+		sum += weights[i + filterSize] * finalValue; 	
+	}
+	edgeBlurBuffer[thisIndex] = sum;
+}
+
+void convertBlurToAlpha()
+{
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y;
+	uint thisIndex = y * size.x + x;
+	
+	float sum = edgeBlurBuffer[thisIndex];
+	
+	//diffuse[thisIndex].a = (sum * 2.5f + perlin[thisIndex] * 1.0f > 1.25f ? 1.0f : 0.0f);
+	diffuse[thisIndex].a = (sum * 0.5f + perlin[thisIndex] * 0.5f > 0.5f ? 1.0f : 0.0f);
+}
+
+void convertBlurToColor()
+{
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y;
+	uint thisIndex = y * size.x + x;
+
+	//float alpha = edgeBlurBuffer[thisIndex] < perlin[thisIndex] ? 1.0f : 0.0f;
+	//alpha *= edgeBlurBuffer[thisIndex];
+	float alpha = edgeBlurBuffer[thisIndex] * perlin[thisIndex];
+	alpha = 1.0f - pow(alpha, pow(4.0f, 32.0f * 0.5f - 32.0f * alpha));
+	alpha *= pow(1.0f - edgeBlurBuffer[thisIndex], 0.8f);
+	
+	diffuse[thisIndex].r = diffuse[thisIndex].r * (1.0f - alpha) + alpha;
+	diffuse[thisIndex].g = diffuse[thisIndex].g * (1.0f - alpha) + alpha;
+	diffuse[thisIndex].b = diffuse[thisIndex].b * (1.0f - alpha) + alpha; 
+}
+
+void main() 
+{
+	if(stage == 0)
+		clear();
+	else if(stage == 1)
+		horizontalBlur();
+	else if(stage == 2)
+		verticalBlur();
+	else if(stage == 3)
+		convertBlurToAlpha();
+	else if(stage == 4)
+		convertBlurToColor();			
+}

@@ -1,0 +1,153 @@
+#version 450
+
+struct Vector3 
+{
+	float x, y, z;
+};
+
+layout (location = 0) uniform float size;
+layout (location = 1) uniform vec2 center;
+layout (location = 2) uniform uint vertexCount;
+layout (location = 3) uniform uint mode;
+layout (location = 4) uniform float c;
+layout (location = 5) uniform float s;
+layout (location = 6) uniform float strength;
+layout (location = 7) uniform int detailTileCount;
+layout (location = 10) uniform vec2 stencilPosition;
+layout (location = 11) uniform vec2 stencilScale;
+
+layout (std430, binding = 0) buffer INDEX_LINKS {
+	uint indexLinks[];
+};
+
+layout (std430, binding = 1) buffer VERTEX_POSITIONS {
+	Vector3 vertexPositions[];
+};
+
+layout (std430, binding = 2) buffer POSITION_RESULT {
+	Vector3 positionResult[];
+};
+
+layout (std430, binding = 3) buffer NORMAL_RESULT {
+	Vector3 normalResult[];
+};
+
+layout (std430, binding = 4) buffer TANGENT_RESULT {
+	Vector3 tangentResult[];
+}; 
+
+uniform sampler2D reliefHeightMap;
+uniform sampler2D reliefDetailMap;
+uniform sampler2D pavementStencil;
+uniform sampler2D roadStencil;
+
+layout (local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+vec3 interpolate(ivec2 coords, float x, float y) 
+{
+	vec2 flatValues = vec2(x - float(coords.x), y - float(coords.y));
+
+	float sum = 0.0f;
+	float weights = 0.0f;
+	float heights[6][6];
+	for(int i = 0; i < 6; ++i)
+		for(int j = 0; j < 6; ++j) 
+		{
+			ivec2 newCoords = coords + ivec2(i - 2, j - 2);
+			ivec2 terrainSize = textureSize(reliefHeightMap, 0);
+			newCoords.x = newCoords.x % terrainSize.x;
+			newCoords.y = newCoords.y % terrainSize.y;
+
+			heights[i][j] = texelFetch(sampler(reliefHeightMap), newCoords).r;
+			float weight = pow(float(newCoords.x) - x, 2.0f) + pow(float(newCoords.y) - y, 2.0f);
+			weight = exp(-weight);
+			weights += weight;
+			sum += heights[i][j] * weight;
+		}
+		
+	return vec3(x, y, sum / weights);
+}
+
+float getPaveHeight(float x, float y)
+{
+	vec2 stencilCoord = vec2(x, y) - stencilPosition.xy;
+	stencilCoord.x /= stencilScale.x;
+	stencilCoord.y /= stencilScale.y;
+	
+	float height = texture(roadStencil, stencilCoord).r;
+	if(height > 1.0f)
+		height = 1.0f;
+
+	return height * 0.03f;
+
+	//float paveHeight = texture(pavementStencil, stencilCoord).r;
+	//float roadHeight = pow(texture(roadStencil, stencilCoord).r, 0.2f) * (1.0f - paveHeight) * 0.65f;
+	//float totalHeight = paveHeight + roadHeight;
+}
+
+void main() 
+{
+	uint index = gl_GlobalInvocationID.x;
+	
+	if(mode == 0) 
+	{
+		float newX = vertexPositions[index].x * 0.3f * size;
+		float newY = vertexPositions[index].y * 0.3f * size;
+		
+		float x = center.x + newX * c - newY * s;
+		x -= c * size * 0.55f;
+		float y = center.y + newX * s + newY * c;
+		y -= s * size * 0.55f;
+		
+		vec3 position = interpolate(ivec2(int(x), int(y)), x, y);
+
+		ivec2 terrainSize = textureSize(reliefHeightMap, 0);
+		vec2 sizeModifier = vec2(float(terrainSize.x), float(terrainSize.y)) / float(detailTileCount);
+		position.z += (texture(reliefDetailMap, vec2(x / sizeModifier.x, y / sizeModifier.y)).r - 0.5f) * strength;
+				
+		position.z += getPaveHeight(x, y);
+		
+		positionResult[index].x = x;
+		positionResult[index].y = y;
+		positionResult[index].z = position.z;
+	} 
+	else 
+	{
+		vec3 fullNormal = vec3(0.0f);
+		vec3 fullTangent = vec3(0.0f);
+		vec3 thisPosition = vec3(positionResult[index].x, positionResult[index].y, positionResult[index].z);
+	
+		uint linkIndex = 12 * index; 
+		vec3 otherPositions[12];
+		for(int i = 0; i < 12; ++i) 
+		{
+			uint other = indexLinks[linkIndex + i];
+			otherPositions[i] = vec3(positionResult[other].x, positionResult[other].y, positionResult[other].z);
+			otherPositions[i] -= thisPosition;
+		}
+
+		for(int i = 0; i < 12; i += 2) 
+		{
+			if(i != 2) 
+			{
+				vec3 normal = cross(otherPositions[i], otherPositions[i + 1]);
+				if(normal.z < 0.0f)
+					normal *= -1.0f;
+
+				fullNormal += normalize(normal);
+				float r = 1.0f / (otherPositions[i].x * otherPositions[i + 1].y - otherPositions[i].y * otherPositions[i + 1].x);
+				fullTangent += normalize((otherPositions[i] * otherPositions[i + 1].y - otherPositions[i + 1] * otherPositions[i].y) * r);
+			}
+		}
+		fullNormal = normalize(fullNormal);
+		fullTangent = normalize(fullTangent);
+		
+		normalResult[index].x = fullNormal.x;
+		normalResult[index].y = fullNormal.y;
+		normalResult[index].z = fullNormal.z;
+		
+		tangentResult[index].x = fullTangent.x;
+		tangentResult[index].y = fullTangent.y;
+		tangentResult[index].z = fullTangent.z;
+	}  
+}

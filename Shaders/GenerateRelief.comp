@@ -1,0 +1,227 @@
+#version 450
+
+layout (location = 0) uniform uint mode;
+layout (location = 1) uniform ivec2 size;
+layout (location = 2) uniform vec2 target;
+layout (location = 3) uniform float decay;
+layout (location = 4) uniform ivec2 particleSize;
+layout (location = 5) uniform ivec2 highDetailTerrainSize;
+layout (location = 7) uniform int detailResolution;
+layout (location = 8) uniform int detailTileCount;
+layout (location = 9) uniform float detailStrength;
+layout (location = 10) uniform float seaLevel;
+
+struct Vector 
+{
+	float x, y;
+};
+
+layout (std430, binding = 0) buffer TERRAIN {
+	float terrain[];
+};
+
+layout (std430, binding = 1) buffer DETAIL {
+	float detail[];
+};
+
+layout (std430, binding = 2) buffer CARVE {
+	float carve[];
+};
+
+layout (std430, binding = 9) buffer GRADIENT {
+	Vector gradient[];
+};   
+
+layout (std430, binding = 10) buffer FILTER {
+	float gaussFilter[];
+};
+
+layout (std430, binding = 11) buffer PARTICLE_POSITION {
+	Vector particle[];
+};
+
+layout (std430, binding = 12) buffer PARTICLE_VELOCITY {
+	Vector particleVelocity[];
+}; 
+
+layout (std430, binding = 13) buffer HIGH_DETAIL_TERRAIN {
+	float highDetailTerrain[];
+};    
+
+uniform sampler2D reliefDetailMap;
+
+layout (local_size_x = 4, local_size_y = 4, local_size_z = 1) in;
+
+void clear() 
+{
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y;
+	
+	uint index = y * size.x + x;
+	terrain[index] = 0.0f;
+	carve[index] = 0.0f;
+}
+
+void lift() 
+{
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y;
+	
+	uint index = y * size.x + x;
+	
+	float newX = target.x;
+	float newY = target.y;
+	if(abs(newX - float(x)) > float(size.x) * 0.5f) 
+	{
+		if(newX > float(x))
+			newX -= float(size.x);
+		else
+			newX += float(size.x);
+	}
+	if(abs(newY - float(y)) > float(size.y) * 0.5f) 
+	{
+		if(newY > float(y))
+			newY -= float(size.y);
+		else
+			newY += float(size.y);
+	}
+	
+	float distance = pow(float(x) - newX, 2.0f) + pow(float(y) - newY, 2.0f);
+	float factor = exp(-distance / (2.0f * pow(decay, 2.0f)));
+	//if(factor > terrain[index])
+	terrain[index] += factor;
+}
+
+void addDetail() 
+{
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y;
+	uint index = y * size.x + x;
+	
+	float terrainFactor = terrain[index] * (1.0f - terrain[index]);
+	terrainFactor = terrainFactor * 0.95f + 0.05f;
+	
+	terrain[index] = terrain[index] + detail[index] * terrainFactor * 0.1f;
+	terrain[index] /= 1.05f;
+}
+
+void computeGradient() 
+{
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y;
+	
+	uint index = y * size.x + x;
+	float slopex = 0.0f, slopey = 0.0f;
+	for(int i = -7; i <= 7; ++i) {
+		for(int j = -7; j <= 7; ++j) {
+			int newX = (int(x) + i) % size.x;
+			int newY = (int(y) + j) % size.y;
+			
+			uint otherIndex = newY * size.x + newX;
+			float dist = sqrt(float(i) * float(i) + float(j) * float(j));
+			float dif = terrain[index] - terrain[otherIndex];
+			if(dist != 0.0f) {
+				slopex += (float(i) / dist) * dif * gaussFilter[(j + 7) * 15 + i + 7];
+				slopey += (float(j) / dist) * dif * gaussFilter[(j + 7) * 15 + i + 7];
+			}
+		}
+	}
+	gradient[index].x = slopex;
+	gradient[index].y = slopey;
+}
+
+void moveParticles() 
+{
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y;
+	
+	uint index = y * particleSize.x + x;
+	uint otherIndex = int(particle[index].y) * size.x + int(particle[index].x); 
+	particleVelocity[index].x += gradient[otherIndex].x * 1.5f;
+	particleVelocity[index].y += gradient[otherIndex].y * 1.5f;
+	particle[index].x += particleVelocity[index].x;
+	particle[index].y += particleVelocity[index].y;
+	particleVelocity[index].x *= 0.9f;
+	particleVelocity[index].y *= 0.9f;
+	
+	if(particle[index].x >= float(size.x))
+		particle[index].x -= float(size.x);
+	if(particle[index].x < 0.0f)
+		particle[index].x += float(size.x);
+		
+	if(particle[index].y >= float(size.y))
+		particle[index].y -= float(size.y);
+	if(particle[index].y < 0.0f)
+		particle[index].y += float(size.y);
+		
+	carve[otherIndex] = sqrt(particleVelocity[index].x * particleVelocity[index].x + particleVelocity[index].y * particleVelocity[index].y) * 5.0f;
+}
+
+void finishTerrain()
+{
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y;
+	uint index = y * size.x + x;
+
+	terrain[index] -= 0.3f;
+	terrain[index] *= 30.0f;
+}
+
+float interpolate(float x, float y) 
+{
+	ivec2 coords = ivec2(int(x), int(y));
+	vec2 flatValues = vec2(x - float(coords.x), y - float(coords.y));
+
+	float sum = 0.0f;
+	float weights = 0.0f;
+	float heights[6][6];
+	for(int i = 0; i < 6; ++i)
+		for(int j = 0; j < 6; ++j) 
+		{
+			ivec2 newCoords = coords + ivec2(i - 2, j - 2);
+			newCoords.x = newCoords.x % size.x;
+			newCoords.y = newCoords.y % size.y;
+
+			uint index = newCoords.y * size.x + newCoords.x;
+			heights[i][j] = terrain[index];
+
+			float weight = pow(float(newCoords.x) - x, 2.0f) + pow(float(newCoords.y) - y, 2.0f);
+			weight = exp(-weight);
+			weights += weight;
+			sum += heights[i][j] * weight;
+		}
+		
+	return sum / weights;
+}
+
+void generateHighDetailTerrain()
+{
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y;
+	uint index = y * highDetailTerrainSize.x + x;
+
+	float height = interpolate(float(x) / float(detailResolution), float(y) / float(detailResolution));
+
+	float tileResolution = float(highDetailTerrainSize.x / detailTileCount);
+	height += (texture(reliefDetailMap, vec2(x / tileResolution, y / tileResolution)).r - 0.5f) * detailStrength;
+
+	highDetailTerrain[index] = height;
+}
+
+void main() 
+{
+	if(mode == 0)
+		clear();
+	else if(mode == 1)
+		lift();
+	else if(mode == 2)
+		addDetail();
+	else if(mode == 3)
+		finishTerrain();
+	else if(mode == 4)
+		computeGradient();
+	else if(mode == 10)
+		moveParticles();
+	else if(mode == 11)
+		generateHighDetailTerrain();
+}

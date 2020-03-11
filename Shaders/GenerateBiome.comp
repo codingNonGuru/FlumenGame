@@ -1,0 +1,62 @@
+#version 450
+#extension GL_ARB_compute_variable_group_size: enable
+
+layout (location = 0) uniform int stage;
+layout (location = 1) uniform uvec2 size;
+
+layout (std430, binding = 0) buffer RAINFALL 
+{
+	float rainfall[];
+};
+
+layout (std430, binding = 1) buffer VARIATION 
+{
+	float variation[];
+};
+
+layout (local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void addTemperature()
+{
+    uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y;
+	uint index = y * size.x + x;
+
+    int latitude = int(y) - int(size.y) / 2;
+    float c = float(size.y) / 3.5f;
+    float temperature = exp(-pow(float(latitude), 2.0f) / (2.0f * c * c));
+
+    c = float(size.y) / 4.0f;
+    int desertLatitude = int(size.y) / 6;
+    float desertStrength = 0.3f;
+    if(latitude > 0)
+    {
+        temperature *= 1.0f - desertStrength * exp(-pow(float(latitude - desertLatitude), 2.0f) / (0.0625f * c * c));
+    }
+    else
+    {
+        temperature *= 1.0f - desertStrength * exp(-pow(float(latitude + desertLatitude), 2.0f) / (0.0625f * c * c));
+    }
+
+    rainfall[index] *= temperature;
+}
+
+void addVariation()
+{
+    uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y;
+	uint index = y * size.x + x;
+
+    //rainfall[index] = variation[index] * 0.4f + rainfall[index] * 0.7f;
+    rainfall[index] += (variation[index] - 0.5f) * 0.5f;
+    if(rainfall[index] < 0.0f)
+        rainfall[index] = 0.0f;
+}
+
+void main()
+{
+    if(stage == 0)
+        addTemperature();
+    if(stage == 1)
+        addVariation();
+}

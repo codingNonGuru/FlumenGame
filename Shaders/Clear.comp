@@ -1,0 +1,52 @@
+#version 450
+#extension GL_ARB_compute_variable_group_size: enable
+
+layout (location = 0) uniform uvec2 size;
+layout (location = 1) uniform vec4 color;
+layout (location = 2) uniform uint format;
+
+struct Color {
+	float r, g, b;
+};
+
+layout (std430, binding = 0) buffer RGBA_BASE 
+{
+	vec4 rgbaBase[];
+};
+
+layout (std430, binding = 1) buffer COLOR_BASE 
+{
+	Color colorBase[];
+};
+
+layout (std430, binding = 2) buffer ALPHA_BASE 
+{
+	float alphaBase[];
+};
+
+layout (local_size_x = 4, local_size_y = 4, local_size_z = 1) in;
+
+void main() 
+{
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y;
+	uint index = y * size.x + x;
+
+    if(format == 0) 
+	{
+        rgbaBase[index].r = color.r;
+        rgbaBase[index].g = color.g;
+        rgbaBase[index].b = color.b;
+        rgbaBase[index].a = color.a;
+	} 
+	else if(format == 1) 
+	{ 
+        colorBase[index].r = color.r;
+        colorBase[index].g = color.g;
+        colorBase[index].b = color.b;
+	} 
+	else if(format == 2) 
+	{ 
+		alphaBase[index] = color.r;
+	}
+}

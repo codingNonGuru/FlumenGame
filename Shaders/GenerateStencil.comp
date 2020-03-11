@@ -1,0 +1,32 @@
+#version 450
+#extension GL_ARB_compute_variable_group_size: enable
+
+layout (location = 0) uniform uvec2 offset;
+layout (location = 1) uniform uvec2 stencilSize;
+layout (location = 2) uniform uvec2 sourceSize;
+
+layout (std430, binding = 0) buffer STENCIL {
+	float stencil[];
+};
+
+layout (std430, binding = 1) buffer SOURCE {
+	float source[];
+};
+
+layout (local_size_x = 4, local_size_y = 4, local_size_z = 1) in;
+
+void main() 
+{
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y;
+	uint index = y * stencilSize.x + x;
+	
+	float excentricity = pow(float(x) - float(stencilSize.x) / 2.0f, 2.0f) + pow(float(y) - float(stencilSize.y) / 2.0f, 2.0f);
+	//excentricity = pow(excentricity, 2.0f);
+	float c = 2.0f * pow(150.0f, 2.0f); 
+
+	float baseValue = source[(y + offset.y) * sourceSize.x + x + offset.x];
+	float newValue = baseValue * exp(-excentricity / c);
+	//stencil[index] = baseValue < newValue ? baseValue : newValue;
+	stencil[index] = pow(newValue, pow(8.0f, 32.0f * 0.5f - 32.0f * newValue));
+}
